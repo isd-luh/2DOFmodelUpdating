@@ -5,10 +5,10 @@ clc
 % Add part of EngiO framework to path
 % Reference:
 % Berger et al. (2021), doi: 10.1016/j.advengsoft.2020.102959
-addpath(genpath(fullfile('EngiO')), '-frozen');
+addpath(genpath('EngiO'), '-frozen');
 
 % Add problem folder to path
-addpath(genpath(fullfile('2DOF')), '-frozen');
+addpath(genpath('2DOF'), '-frozen');
 
 % Create folder for saving results
 strResultFolder = 'ResultFolder2DOF';
