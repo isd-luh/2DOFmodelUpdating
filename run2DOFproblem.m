@@ -10,242 +10,245 @@ addpath(genpath('EngiO'), '-frozen');
 % Add problem folder to path
 addpath(genpath('2DOF'), '-frozen');
 
-% Create folder for saving results
-strResultFolder = 'ResultFolder2DOF';
-mkdir(strResultFolder)
-
 %% Problem definition 2DOF system
 % Reference:
 % Lye et al. (2021), doi: 10.1016/j.ymssp.2021.107760
 
 % String design variables
-cstrDVs = {'k_1', 'k_2'};
-
-% Correct design variables (= spring stiffnesses)
-afDVsCorrect = [0.5, 1.5;...
-    3,   0.25];
-
-% Standard distribution noise
-afSigmaNoise = [0.1, 0.05];
-
-% Calculate correct eigenvalues
-afEigenvaluesCorrect = calcEigenvalues(afDVsCorrect(1,:));
-nDVs = size(afDVsCorrect,2);
+strDVs = {'k_1', 'k_2'};
+nDVs = numel(strDVs);
 
 % Lower and upper bounds
-afLB = [0.01, 0.01];
-afUB = [4,    4   ];
+lowerBound = [0.01, 0.01];
+upperBound = [2, 2];
 
-% Run model updating with implemented methods 'TMCMC', 'MCGO' and 'meta-MCGO'
-%% Transitional Markov chain Monte Carlo (TMCMC)
-fprintf('\nCalculation using TMCMC\n')
-
-% Create data queue
-mfQueueTMCMC = parallel.pool.PollableDataQueue;
-
-% Set model updating problem
-problemTMCMC = class2DOF(afEigenvaluesCorrect, afSigmaNoise, mfQueueTMCMC, 'TMCMC', []);
-probTMCMC = @(x, index)problemTMCMC.calcObjValue(x, index);
-
-% Set number of Monte Carlo samples
-nMCSamplesTMCMC = 1000;
-
-% Run TMCMC
-[cSamplesTMCMC, ~] = calcTMCMC(probTMCMC, afLB, afUB, nMCSamplesTMCMC, 0);
-mOptimalDVsTMCMC = cSamplesTMCMC{1,end};
-mfEigenvaluesOptimalTMCMC = calcEigenvalues([mOptimalDVsTMCMC(:,1), mOptimalDVsTMCMC(:,2)]);
-save(fullfile(strResultFolder, 'mOptimalDVsTMCMC'), 'mOptimalDVsTMCMC')
-save(fullfile(strResultFolder, 'mfEigenvaluesOptimalTMCMC'), 'mfEigenvaluesOptimalTMCMC')
-
-% Get results from queue
-mfQueueResultsTMCMC  = [];
-while true
-    [dataTMCMC, bDataTMCMC] = poll(mfQueueTMCMC);
-    mfQueueResultsTMCMC = [mfQueueResultsTMCMC; dataTMCMC];
-    if ~bDataTMCMC
-        break
-    end
+% Choose distribution function (choices are "Gaussian" or "Weibull")
+strInputDist = 'Gaussian'; 
+if isequal(strInputDist, 'Gaussian')
+    correct_k = [0.5, 1.5];
+    meanEigenvalues = calcEigenvalues(correct_k);
+    sigmaEigenvalues = [0.1, 0.05];
+    scaleWB = [];
+    shapeWB = [];
+elseif isequal(strInputDist, 'Weibull')
+    scaleWB = [3.4,0.22];
+    shapeWB = [60,40];
+    example_k = importdata(fullfile('2DOF','example_k_Weibull.mat'));
+    exampleEigenvalues = calcEigenvalues(example_k);
+    meanEigenvalues = mean(exampleEigenvalues);
+    sigmaEigenvalues = std(exampleEigenvalues);
 end
-mfSamplesTMCMC = mfQueueResultsTMCMC(:,1:2);
-mfEigenvaluesTMCMC = mfQueueResultsTMCMC(:,3:end);
+
+% Create folder for saving results
+strResultFolder = ['ResultFolder2DOF_',strInputDist];
+mkdir(strResultFolder)
 
 
-%% Monte Carlo global optimization (MCGO)
-fprintf('\nCalculation using MCGO\n');
+%% Bayesian model updating (BMU) using the transitional Markov chain Monte Carlo (TMCMC) sampling technique
+fprintf('\nBMU calculation using TMCMC\n')
 
-% Settings for optimization runs
-optimizerMCGO = GlobalPattern();
-optOptionsMCGO = struct('maxEvals', 500, 'numWorkers', 1, ...
+% Set number of samples for TMCMC
+nSamplesTMCMC = 500;
+save(fullfile(strResultFolder,'nSamplesTMCMC'), 'nSamplesTMCMC')
+
+nRunsTMCMC = 3;
+fprintf('\n  - Calculate %d runs\n', nRunsTMCMC);
+optimalDVsBMU = {};
+optimalEVsBMU = {};
+for iRunTMCMC = 1:nRunsTMCMC
+    fprintf('\n  - Run No. %d \n', iRunTMCMC);
+
+    % Set model updating problem
+    problemTMCMC = class2DOF(meanEigenvalues, sigmaEigenvalues, [], 'BMU', []);
+    LogL = @(x, index)problemTMCMC.calcObjValue(x, index);
+    
+    % Run TMCMC
+    [DVsamplesBMU, ~] = calcTMCMC(LogL, lowerBound, upperBound, nSamplesTMCMC, 0);
+    optimalDVsBMU{1,iRunTMCMC} = DVsamplesBMU{1,end};
+    optimalEVsBMU{1,iRunTMCMC} = calcEigenvalues(optimalDVsBMU{1,iRunTMCMC});
+
+end
+save(fullfile(strResultFolder, 'optimalDVsBMU'), 'optimalDVsBMU')
+save(fullfile(strResultFolder, 'optimalEVsBMU'), 'optimalEVsBMU')
+
+
+%% Repeated deterministic model updating (RDMU)
+
+% Sampling method 
+% -> choices are Halton sequence (HS), Sobol sequence (SS), Monte Carlo (MC)
+strSamplerRDMU = 'HS'; 
+% Optimization algorithm 
+% -> choices are global pattern search (GPS), genetic algorithm (GA), evolution strategy (ES)
+strOptimizerRDMU = 'GPS';
+fprintf('\nRDMU calculation using %s%s\n', strSamplerRDMU, strOptimizerRDMU);
+
+fprintf('\n  - Generate samples\n');
+
+% Set number of samples for sample generation (SG)
+nSamplesRDMU = 500;
+
+% Generate eigenvalue samples (dependent on choice of sampling method)
+EVsamplesRDMU = generateEVsamples(strSamplerRDMU, nDVs, nSamplesRDMU, ...
+    strInputDist, meanEigenvalues, sigmaEigenvalues, scaleWB, shapeWB);
+save(fullfile(strResultFolder,'EVsamplesRDMU'), 'EVsamplesRDMU')
+
+
+fprintf('\n  - Updating\n');
+% Settings for optimization runs (dependent on choice of optimization algorithm)
+[optimizerRDMU, optParamsRDMU] = optSettings(strOptimizerRDMU);
+optOptionsRDMU = struct('maxEvals', 1000, 'numWorkers', 1, ...
     'saveStates', false, 'outputStatus', false);
-optParamsMCGO  = struct('nTrack', 20);
-
-% Set number of Monte Carlo samples
-nMCSamplesMCGO = 1000;
-
-% Calculate noisy eigenvalues (= input problem)
-mfEigenvaluesNoisyMCGO = zeros(nMCSamplesMCGO, nDVs);
-for iDV = 1:nDVs
-    mfEigenvaluesNoisyMCGO(:,iDV) = normrnd(afEigenvaluesCorrect(iDV), ...
-        afSigmaNoise(iDV), nMCSamplesMCGO, 1);
-end
 
 % Model updating for each sample
-mOptimalDVsMCGO = [];
-cSamplesMCGO = {};
-cEigenvaluesMCGO = {};
-parfor iMCSampleMCGO = 1:nMCSamplesMCGO
-    afEigenvaluesNoisyMCGO = mfEigenvaluesNoisyMCGO(iMCSampleMCGO, :);
-
-    % Create data queue
-    mfQueueMCGO = parallel.pool.PollableDataQueue;
+optimalDVsRDMU = [];
+parfor iSampleRDMU = 1:nSamplesRDMU 
+    currentEVsampleRDMU = EVsamplesRDMU(iSampleRDMU, :);
 
     % Set model updating problem
-    problemMCGO = class2DOF(afEigenvaluesNoisyMCGO, [], mfQueueMCGO, 'MCGO', []);
-    probMCGO = @(x, index)problemMCGO.calcObjValue(x, index);
+    problemRDMU = class2DOF(currentEVsampleRDMU, [], [], 'RDMU', []);
+    objFunRDMU = @(x, index)problemRDMU.calcObjValue(x, index);
 
     % Run optimization
-    [x_opt_MCGO, ~, ~, ~, ~] = optimizerMCGO.optimize(probMCGO, [], afLB, afUB, ...
-        optOptionsMCGO, optParamsMCGO);
-    mOptimalDVsMCGO(iMCSampleMCGO, :) = x_opt_MCGO;
+    [optimalDVsRDMU(iSampleRDMU, :), ~, ~, ~, ~] = optimizerRDMU.optimize(objFunRDMU, [], lowerBound, upperBound, ...
+        optOptionsRDMU, optParamsRDMU);
     
-    % Get results from queue
-    mfQueueResultsMCGO  = [];
-    while true
-        [dataMCGO, bDataMCGO] = poll(mfQueueMCGO);
-        mfQueueResultsMCGO = [mfQueueResultsMCGO; dataMCGO];
-        if ~bDataMCGO
-            break
-        end
-    end
-    cSamplesMCGO{iMCSampleMCGO, 1} = mfQueueResultsMCGO(:, 1:2);
-    cEigenvaluesMCGO{iMCSampleMCGO, 1} = mfQueueResultsMCGO(:, 3:end);
-
 end
-mfEigenvaluesOptimalMCGO = calcEigenvalues([mOptimalDVsMCGO(:,1), mOptimalDVsMCGO(:,2)]);
-save(fullfile(strResultFolder, 'mfEigenvaluesOptimalMCGO'), 'mfEigenvaluesOptimalMCGO')
-save(fullfile(strResultFolder, 'mOptimalDVsMCGO'), 'mOptimalDVsMCGO')
+optimalEVsRDMU = calcEigenvalues(optimalDVsRDMU);
+save(fullfile(strResultFolder, 'optimalDVsRDMU'), 'optimalDVsRDMU')
+save(fullfile(strResultFolder, 'optimalEVsRDMU'), 'optimalEVsRDMU')
 
 
-%% Meta-model Monte Carlo global optimization (meta-MCGO)
-fprintf('\nCalculation using meta-MCGO\n');
+%% Repeated deterministic meta-model updating (metaRDMU)
+% Sampling method 
+% -> choices are Halton sequence (HS), Sobol sequence (SS), Monte Carlo (MC)
+strSamplerMetaRDMU = 'HS'; 
+% Optimization algorithm 
+% -> choices are global pattern search (GPS), genetic algorithm (GA), evolution strategy (ES)
+strOptimizerMetaRDMU = 'GPS';
+fprintf('\nMetaRDMU calculation using meta%s%s\n', strSamplerMetaRDMU, strOptimizerMetaRDMU);
 
-% Settings for optimization run building the meta-model
-optimizerMeta = GlobalPattern();
-optOptionsMeta = struct('maxEvals', 500, 'numWorkers', 1, ...
+fprintf('\n  - Set up meta-model\n');
+% Settings for optimization run building the meta-model 
+% -> here using the global pattern search optimization algorithm
+optimizerMetaModel = GlobalPattern();
+optParamsMetaModel  = struct('nTrack' , 50);
+optOptionsMetaModel = struct('maxEvals', 250, 'numWorkers', 1, ...
     'saveStates', false, 'outputStatus', false);
-optParamsMeta  = struct('nTrack' , 100);
 
 % Create data queue
-mfQueueMeta  = parallel.pool.PollableDataQueue;
+queueMetaModel  = parallel.pool.PollableDataQueue;
 
-% Set model updating problem
-problemMeta = class2DOF(afEigenvaluesCorrect, [], mfQueueMeta, 'MCGO', []);
-probMeta = @(x, index)problemMeta.calcObjValue(x, index);
+% Set model updating problem based on mean eigenvalues
+problemMetaModel = class2DOF(meanEigenvalues, [], queueMetaModel, 'RDMU', []);
+objFunMetaModel = @(x, index)problemMetaModel.calcObjValue(x, index);
 
-% Run optimization
-[~, ~, ~, ~, ~] = optimizerMeta.optimize(probMeta, [], afLB, afUB, ...
-    optOptionsMeta, optParamsMeta);
+% Run optimization based on mean eigenvalues
+[~, ~, ~, ~, ~] = optimizerMetaModel.optimize(objFunMetaModel, [], lowerBound, upperBound, ...
+    optOptionsMetaModel, optParamsMetaModel);
 
 % Get results from queue
-mfQueueResultsMeta  = [];
+queueResultsMetaModel  = [];
 while true
-    [dataMeta, bDataMeta] = poll(mfQueueMeta);
-    mfQueueResultsMeta = [mfQueueResultsMeta; dataMeta];
-    if ~bDataMeta
+    [dataMetaModel, bDataMetaModel] = poll(queueMetaModel);
+    queueResultsMetaModel = [queueResultsMetaModel; dataMetaModel];
+    if ~bDataMetaModel
         break
     end
 end
-mfSamplesMeta = mfQueueResultsMeta(:,1:2);
-mfEigenvaluesMeta = mfQueueResultsMeta(:,3:end);
+DVsamplesMetaModel = queueResultsMetaModel(:,1:2);
+EVsamplesMetaModel = queueResultsMetaModel(:,3:end);
 
-% Build meta-model (using interpolation)
-outputMeta = scatterModel(mfSamplesMeta, mfEigenvaluesMeta, afLB, afUB);
+fprintf('\n  - Build meta-model\n');
+outputMetaModel = scatterModel(DVsamplesMetaModel, EVsamplesMetaModel, lowerBound, upperBound);
 
-% Set number of Monte Carlo samples
-nMCSamplesMetaMCGO = 1000;
+fprintf('\n  - Generate samples\n');
+% Set number of samples for sample generation (SG) 
+% -> using the Halton sequence sampling method
+nSamplesMetaRDMU = 500;
 
-% Generate noisy eigenvalues (= input problem)
-mfEigenvaluesNoisyMetaMCGO = zeros(nMCSamplesMetaMCGO, nDVs);
-for iDV = 1:nDVs
-    mfEigenvaluesNoisyMetaMCGO(:,iDV) = normrnd(afEigenvaluesCorrect(iDV), ...
-        afSigmaNoise(iDV), nMCSamplesMetaMCGO, 1);
-end
+% Generate eigenvalue samples 
+EVsamplesMetaRDMU = generateEVsamples(strSamplerMetaRDMU, nDVs, nSamplesMetaRDMU, ...
+    strInputDist, meanEigenvalues, sigmaEigenvalues, scaleWB, shapeWB);
+save(fullfile(strResultFolder,'EVsamplesMetaRDMU'), 'EVsamplesMetaRDMU')
+
+
+% 4) Updating on meta-model
+fprintf('\n  - Updating on meta-model\n');
 
 % Settings for optimization run on meta-model
-optimizerMetaMCGO = GlobalPattern();
-optOptionsMetaMCGO = struct('maxEvals', 500, 'numWorkers', 1, ...
+[optimizerMetaRDMU, optParamsMetaRDMU] = optSettings(strOptimizerMetaRDMU);
+optOptionsMetaRDMU = struct('maxEvals', 1000, 'numWorkers', 1, ...
     'saveStates', false, 'outputStatus', false);
-optParamsMetaMCGO  = struct('nTrack' , 20);
 
 % Model updating for each sample on meta-model
-mOptimalDVsMetaMCGO = [];
-cSamplesMetaMCGO = {};
-cEigenvaluesMetaMCGO = {};
-parfor iMCSampleMetaMCGO = 1:size(mfEigenvaluesNoisyMCGO,1)
-    afEigenvaluesNoisyMetaMCGO = mfEigenvaluesNoisyMetaMCGO(iMCSampleMetaMCGO, :);
-
-    % Create data queue
-    mfQueueMetaMCGO = parallel.pool.PollableDataQueue;
+optimalDVsMetaRDMU = [];
+for iSampleMetaRDMU = 1:nSamplesMetaRDMU
+    currentEVsampleMetaRDMU = EVsamplesMetaRDMU(iSampleMetaRDMU, :);
 
     % Set model updating problem
-    problemMetaMCGO = class2DOF(afEigenvaluesNoisyMetaMCGO, [], ...
-        mfQueueMetaMCGO, 'meta-MCGO', @outputMeta.predict);
-    probMetaMCGO = @(x)problemMetaMCGO.calcObjValue(x);
+    problemMetaRDMU = class2DOF(currentEVsampleMetaRDMU, [], [], 'MetaRDMU', @outputMetaModel.predict);
+    objFunMetaRDMU = @(x, index)problemMetaRDMU.calcObjValue(x, index);
 
     % Run optimization
-    [x_opt_MetaMCGO, ~, ~, ~, ~] = optimizerMetaMCGO.optimize(probMetaMCGO, [], ...
-        afLB, afUB, optOptionsMetaMCGO, optParamsMetaMCGO);
-    mOptimalDVsMetaMCGO(iMCSampleMetaMCGO, :) = x_opt_MetaMCGO;
+    [optimalDVsMetaRDMU(iSampleMetaRDMU, :), ~, ~, ~, ~] = ...
+        optimizerMetaRDMU.optimize(objFunMetaRDMU, [], lowerBound, upperBound, ...
+        optOptionsMetaRDMU, optParamsMetaRDMU);
     
-    % Get results from queue
-    mfQueueResultsMetaMCGO  = [];
-    while true
-        [dataMetaMCGO, bDataMetaMCGO] = poll(mfQueueMetaMCGO);
-        mfQueueResultsMetaMCGO = [mfQueueResultsMetaMCGO; dataMetaMCGO];
-        if ~bDataMetaMCGO
-            break
-        end
-    end
-    cSamplesMetaMCGO{iMCSampleMetaMCGO} = mfQueueResultsMetaMCGO(:,1:2);
-    cEigenvaluesMetaMCGO{iMCSampleMetaMCGO} = mfQueueResultsMetaMCGO(:,3:end);
-
 end
-mfEigenvaluesOptimalMetaMCGO = calcEigenvalues([mOptimalDVsMetaMCGO(:,1), mOptimalDVsMetaMCGO(:,2)]);
-save(fullfile(strResultFolder, 'mfEigenvaluesOptimalMetaMCGO'), 'mfEigenvaluesOptimalMetaMCGO')
-save(fullfile(strResultFolder, 'mOptimalDVsMetaMCGO'), 'mOptimalDVsMetaMCGO')
+optimalEVsMetaRDMU = calcEigenvalues(optimalDVsMetaRDMU);
+save(fullfile(strResultFolder, 'optimalDVsMetaRDMU'), 'optimalDVsMetaRDMU')
+save(fullfile(strResultFolder, 'optimalEVsMetaRDMU'), 'optimalEVsMetaRDMU')
+
 
 
 %% Plot results
-cstrMethods = {'TMCMC', 'MCGO', 'Meta-MCGO'};
+close all
+strMethods = {'BMU (TMCMC)', ...
+    ['RDMU (', strSamplerRDMU, strOptimizerRDMU, ')'], ...
+    ['MetaRDMU (', strSamplerMetaRDMU, strOptimizerMetaRDMU, ')']};
 
-plotColors = {[0 0.4470 0.7410], ...
-    [0.8500 0.3250 0.0980], ...
-    [0.9290 0.6940 0.1250]};
+% Plot colors
+blueColor = [0 0.4470 0.7410];
+redColor = [0.8500 0.3250 0.0980];
+yellowColor = [0.9290 0.6940 0.1250];
 
 
-%% Plot comparison samples
+% Plot comparison samples
 for iDV = 1:nDVs
     figure
     hold on
     
-    plot1 = cdfplot(mOptimalDVsTMCMC(:, iDV));
-    set(plot1, 'LineWidth', 2, 'Color', plotColors{1})
+    plot1 = cdfplot(optimalDVsBMU{1,1}(:, iDV));    % plot first TMCMC run
+    set(plot1, 'LineWidth', 2, 'Color', blueColor)
+
+    plot2 = cdfplot(optimalDVsRDMU(:, iDV));
+    set(plot2, 'LineWidth', 2.5, 'Color', redColor)
     
-    plot2 = cdfplot(mOptimalDVsMCGO(:, iDV));
-    set(plot2, 'LineWidth', 2, 'Color', plotColors{2})
+    plot3 = cdfplot(optimalDVsMetaRDMU(:, iDV));
+    set(plot3, 'LineWidth', 2.5, 'LineStyle', '--', 'Color', yellowColor)
     
-    plot3 = cdfplot(mOptimalDVsMetaMCGO(:, iDV));
-    set(plot3, 'LineWidth', 2, 'Color', plotColors{3})
-    
-    xline(afDVsCorrect(1, iDV), '--k', 'LineWidth', 2)
-    xline(afDVsCorrect(2, iDV), '--k', 'LineWidth', 2)
+    if isequal(strInputDist,'Gaussian')
+        xline(correct_k(iDV), '--k', 'LineWidth', 2)
+    elseif isequal(strInputDist,'Weibull')
+        plot4 = cdfplot(example_k(:, iDV));
+        set(plot4, 'LineWidth', 2, 'Color', 'k', 'LineStyle', '--')
+    end
+
+    for iRunTMCMC = 2:nRunsTMCMC    % plot other TMCMC run
+        plot1 = cdfplot(optimalDVsBMU{1,iRunTMCMC}(:, iDV));
+        set(plot1, 'LineWidth', 2, 'Color', blueColor)
+    end
+
 
     xlabel(['{\it k}_', num2str(iDV)])
     ylabel(['F({\itk}_', num2str(iDV), ')'])
-    xlim([afLB(iDV), afUB(iDV)])
+    xlim([lowerBound(iDV), upperBound(iDV)])
     title('')
-    if iDV == 2
-        legend([cstrMethods, 'Correct values'])
+    if iDV == 1
+        xlim([0.1,0.9])
+    elseif iDV == 2
+        legend([strMethods, 'Correct solution'])
+        xlim([1.3,1.7])
     end
     ax = gca;
     ax.FontSize = 12;
@@ -258,28 +261,33 @@ for iDV = 1:nDVs
 end
 
 
-%% Plot samples
+% Plot samples
 nPlotSamples = 200;
 figure
 hold on
 
-scatter(mOptimalDVsTMCMC(1:nPlotSamples,1), mOptimalDVsTMCMC(1:nPlotSamples,2), 'd', ...
-    'LineWidth', 1.3, 'Color', plotColors{1})
-scatter(mOptimalDVsMCGO(1:nPlotSamples,1), mOptimalDVsMCGO(1:nPlotSamples,2), 's', ...
-    'LineWidth', 1.3, 'Color', plotColors{2})
-scatter(mOptimalDVsMetaMCGO(1:nPlotSamples,1), mOptimalDVsMetaMCGO(1:nPlotSamples,2), 'o', ...
-    'LineWidth', 1.3, 'Color', plotColors{3})
-plot(afDVsCorrect(1,1), afDVsCorrect(1,2), 'k +', 'MarkerSize', 10, 'LineWidth', 2)
-plot(afDVsCorrect(2,1), afDVsCorrect(2,2), 'k +', 'MarkerSize', 10, 'LineWidth', 2)
+plot(optimalDVsBMU{1,1}(1:nPlotSamples,1), optimalDVsBMU{1,1}(1:nPlotSamples,2), 'd', ...
+    'LineWidth', 1.3, 'Color', blueColor)       % plot first TMCMC run
+plot(optimalDVsRDMU(1:nPlotSamples,1), optimalDVsRDMU(1:nPlotSamples,2), 's', ...
+    'LineWidth', 1.3, 'Color', redColor, 'MarkerSize', 7)
+plot(optimalDVsMetaRDMU(1:nPlotSamples,1), optimalDVsMetaRDMU(1:nPlotSamples,2), 'o', ...
+    'LineWidth', 1.3, 'Color', yellowColor, 'MarkerSize', 9)
+if isequal(strInputDist,'Gaussian')
+    plot(correct_k(1), correct_k(2), 'k +', 'MarkerSize', 10, 'LineWidth', 2)
+    legend([strMethods, 'Correct solution'])
+elseif isequal(strInputDist,'Weibull')
+    legend(strMethods)
+end
 
 xlabel('{\it k}_1')
 ylabel('{\it k}_2')
-xlim([afLB(1), afUB(1)])
-ylim([afLB(2), afUB(2)])
+xlim([lowerBound(1), upperBound(1)])
+ylim([lowerBound(2), upperBound(2)])
 title('')
 grid on
 box on
-legend([cstrMethods, 'Correct values'])
+xlim([0.1,0.9])
+ylim([1.3,1.7])
 ax = gca;
 ax.FontSize = 12;
 ax.FontName = 'Times';
@@ -287,24 +295,24 @@ set(gcf, 'Name', 'Comparison samples')
 savefig(fullfile(strResultFolder,'fig2DOF_DVspace'))
 
 
-%% Plot eigenvalues
+% Plot eigenvalues
 nPlotSamples = 200;
 figure
 hold on
 
-scatter(mfEigenvaluesOptimalTMCMC(1:nPlotSamples,1), mfEigenvaluesOptimalTMCMC(1:nPlotSamples,2), 'd', ...
-    'LineWidth', 1.3, 'Color', plotColors{1})
-scatter(mfEigenvaluesOptimalMCGO(1:nPlotSamples,1), mOptimalDVsMCGO(1:nPlotSamples,2), 's', ...
-    'LineWidth', 1.3, 'Color', plotColors{2})
-scatter(mfEigenvaluesOptimalMetaMCGO(1:nPlotSamples,1), mOptimalDVsMetaMCGO(1:nPlotSamples,2), 'o', ...
-    'LineWidth', 1.3, 'Color', plotColors{3})
-plot(afEigenvaluesCorrect(1), afEigenvaluesCorrect(2), 'k +', 'MarkerSize', 10, 'LineWidth', 2)
+plot(optimalEVsBMU{1,1}(1:nPlotSamples,1), optimalEVsBMU{1,1}(1:nPlotSamples,2), 'd', ...
+    'LineWidth', 1.3, 'Color', blueColor)       % plot first TMCMC run
+plot(optimalEVsRDMU(1:nPlotSamples,1), optimalEVsRDMU(1:nPlotSamples,2), 's', ...
+    'LineWidth', 1.3, 'Color', redColor, 'MarkerSize', 7)
+plot(optimalEVsMetaRDMU(1:nPlotSamples,1), optimalEVsMetaRDMU(1:nPlotSamples,2), 'o', ...
+    'LineWidth', 1.3, 'Color', yellowColor, 'MarkerSize', 9)
+plot(meanEigenvalues(1), meanEigenvalues(2), 'k +', 'MarkerSize', 10, 'LineWidth', 2)
 
 t = -pi:0.01:pi;
-x1 = afEigenvaluesCorrect(1) + afSigmaNoise(1) * cos(t);
-y1 = afEigenvaluesCorrect(2) + afSigmaNoise(2) * sin(t);
-x2 = afEigenvaluesCorrect(1) + 2*afSigmaNoise(1) * cos(t);
-y2 = afEigenvaluesCorrect(2) + 2*afSigmaNoise(2) * sin(t);
+x1 = meanEigenvalues(1) + sigmaEigenvalues(1) * cos(t);
+y1 = meanEigenvalues(2) + sigmaEigenvalues(2) * sin(t);
+x2 = meanEigenvalues(1) + 2*sigmaEigenvalues(1) * cos(t);
+y2 = meanEigenvalues(2) + 2*sigmaEigenvalues(2) * sin(t);
 plot(x1, y1, 'k', 'LineWidth', 1.3)
 plot(x2, y2, '--k', 'LineWidth', 1.3)
 
@@ -315,11 +323,11 @@ ylim([0.05,0.4])
 title('')
 grid on
 box on
-legend([cstrMethods, 'Correct value', '1\bf{\sigma}_\lambda', '2\bf{\sigma}_\lambda'])
+legend([strMethods, 'Mean eigenvalue', '1\bf{\sigma}_\lambda', '2\bf{\sigma}_\lambda'])
 ax = gca;
 ax.FontSize = 12;
 ax.FontName = 'Times';
 
 set(gcf, 'Name', 'Comparison eigenvalues')
-savefig(fullfile(strResultFolder,'fig2DOF_OFVspace'))
+savefig(fullfile(strResultFolder,'fig2DOF_EVspace'))
 
